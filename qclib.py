@@ -34,7 +34,7 @@ def round_sparse(M: spmatrix, decimals: int = 10) -> spmatrix:
 def sparse_is_equal(A: spmatrix, B: spmatrix) -> bool:
     return np.all(A.data == B.data) and np.all(A.indices == B.indices) and np.all(A.indptr == B.indptr)
 
-HADAMARD = (1.0 / np.sqrt(2)) * np.array([
+H = (1.0 / np.sqrt(2)) * np.array([
     [1., 1.],
     [1., -1.]
 ], dtype=np.complex128)
@@ -57,6 +57,12 @@ S = np.array([
 T = np.array([
     [1., 0.],
     [0., np.exp(complex(0, pi/4.0))]
+], dtype=np.complex128)
+SWAP = np.array([
+    [1., 0., 0., 0.],
+    [0., 0., 1., 0.],
+    [0., 1., 0., 0.],
+    [0., 0., 0., 1.]
 ], dtype=np.complex128)
 
 def dirac(state: np.array, precision: int = 2) -> str:
@@ -88,7 +94,7 @@ def dirac(state: np.array, precision: int = 2) -> str:
             if not first:
                 value = "+ "
             value += f"("
-            value += str(round(abs(float(state.real[i])), precision))
+            value += str(round(float(state.real[i]), precision))
 
             if (state.imag[i] < 0):
                 value += " - "
@@ -108,9 +114,26 @@ def dirac(state: np.array, precision: int = 2) -> str:
         return "0"
     return basis
 
+def simplify_ensemble(ensemble: list[list]) -> list[list]:
+    simplified_ensemble = []
+    orig = deepcopy(ensemble)
+
+    while len(orig) > 0:
+        pure_state = deepcopy(orig[0])
+
+        for i in range(1, len(orig)):
+            if np.array_equal(pure_state[1], orig[i][1]): 
+                pure_state[0] += orig[i][0]
+
+        simplified_ensemble.append(pure_state)
+        orig = [left_over for left_over in orig if not np.array_equal(pure_state[1], left_over[1])]
+
+    return simplified_ensemble
+
+
 class Gate:
     is_measurement = False
-    def __init__(self, U: np.array, targets: list = [], controls: list = [], n_wires: int = -1, classical_control: int = None, label: str = None):
+    def __init__(self, U: np.array, targets: list = [], controls: list = [], n_wires: int = -1, classical_control: int = None, label: str = None, build: bool = True):
         self.U = csr_matrix(U)
         self.U.dtype = np.complex128
         self.targets = deepcopy(targets)
@@ -120,7 +143,7 @@ class Gate:
         self.M = None
 
         if label == None:
-            if np.array_equal(U, HADAMARD):
+            if np.array_equal(U, H):
                 label = "H"
             elif np.array_equal(U, X):
                 label = "X"
@@ -132,6 +155,8 @@ class Gate:
                 label = "S"
             elif np.array_equal(U, T):
                 label = "T"
+            elif np.array_equal(U, SWAP):
+                label = "SWAP"
 
         self.label = label
 
@@ -145,8 +170,9 @@ class Gate:
         else:
             self.n_wires = n_wires
 
-        self.build_permutation_matrix()
-        self.build_matrix()
+        if build:
+            self.build_permutation_matrix()
+            self.build_matrix()
 
     def build_permutation_matrix(self):
         N = 2**self.n_wires
@@ -164,7 +190,8 @@ class Gate:
 
             for t in range(n_t):
                 bit = (i >> (self.n_wires - 1 - (n_c + t))) & 1
-                sorted_qb[self.n_wires - 1 - self.targets[t]] = bit
+                # Not going to debug this, but need to reverse targets list? This is due to it being targets bottom -> top
+                sorted_qb[self.n_wires - 1 - self.targets[len(self.targets) - 1 - t]] = bit
 
             used = []
             for t in self.targets:
@@ -231,9 +258,12 @@ class QC:
 
         return U
     
-    def run(self, state: np.array):
+    def run(self, state: np.array, classical_wires: list = []) -> list[list]:
         N = 2**self.n_wires
-        ensemble = [[1.0, state, [0 for _ in range(self.n_classical_wires)]]]
+        if len(classical_wires) == 0:
+            ensemble = [[1.0, state, [0 for _ in range(self.n_classical_wires)]]]
+        else:
+            ensemble = [[1.0, state, deepcopy(classical_wires)]]
 
         for i in range(len(self.gates)):
             new_ensemble = []
@@ -268,28 +298,32 @@ class QC:
                         classical_wires1 = deepcopy(pure_state[2])
                         classical_wires1[self.gates[i].control] = 1
 
-                        new_ensemble.append([pure_state[0] * p0, (proj_0 @ pure_state[1]) / mag0, classical_wires0])
-                        new_ensemble.append([pure_state[0] * p1, (proj_1 @ pure_state[1]) / mag1, classical_wires1])
+                        if (mag0 != 0):
+                            new_ensemble.append([pure_state[0] * p0, (proj_0 @ pure_state[1]) / mag0, classical_wires0])
+                        if (mag1 != 0):
+                            new_ensemble.append([pure_state[0] * p1, (proj_1 @ pure_state[1]) / mag1, classical_wires1])
                     else:
-                        new_ensemble.append([pure_state[0] * p0, (proj_0 @ pure_state[1]) / mag0, pure_state[2]])
-                        new_ensemble.append([pure_state[0] * p1, (proj_1 @ pure_state[1]) / mag1, pure_state[2]])
+                        if (mag0 != 0):
+                            new_ensemble.append([pure_state[0] * p0, (proj_0 @ pure_state[1]) / mag0, pure_state[2]])
+                        if (mag1 != 0):
+                            new_ensemble.append([pure_state[0] * p1, (proj_1 @ pure_state[1]) / mag1, pure_state[2]])
 
                 ensemble = new_ensemble
 
+        return simplify_ensemble(ensemble)
 
-        simplified_ensemble = []
-        while len(ensemble) > 0:
-            pure_state = deepcopy(ensemble[0])
+    def run_ensemble(self, ensemble: list[list]) -> list[list]:
+        output_ensemble = []
+        
+        for pure_state in ensemble:
+            temp_ensemble = self.run(pure_state[1], pure_state[2])
 
-            for i in range(1, len(ensemble)):
-                if np.array_equal(pure_state[1], ensemble[i][1]) and np.array_equal(pure_state[2], ensemble[i][2]): 
-                    pure_state[0] += ensemble[i][0]
+            for temp_state in temp_ensemble:
+                output_ensemble.append([pure_state[0] * temp_state[0], temp_state[1], temp_state[2]])
 
-            simplified_ensemble.append(pure_state)
+        return simplify_ensemble(output_ensemble)
 
-            ensemble = [left_over for left_over in ensemble if not (np.array_equal(pure_state[1], left_over[1]) and np.array_equal(pure_state[2], left_over[2]))]
-
-        return simplified_ensemble
+        
 
     def add_loaded_gate(self, gate: Gate) -> None:
         self.gates.append(gate)
@@ -348,19 +382,6 @@ class QC:
                 ax.add_patch(arc)
                 ax.plot([x + GATE_SIZE / 2.0, x + GATE_SIZE / 2.0 + .3 * GATE_SIZE], [self.gates[gate_i].target - .2 * GATE_SIZE, self.gates[gate_i].target + .1 * GATE_SIZE], linewidth=LINE_WIDTH, color="black", zorder=5)
 
-                # text = f"?"
-                # tp = TextPath((0, 0), text, size = GATE_SIZE)
-                # bbox = tp.get_extents()
-
-                # scale = (TEXT_SIZE * GATE_SIZE) / max(bbox.width, bbox.height)
-
-                # x_text = x + GATE_SIZE / 2.0
-                # y_text = y + GATE_SIZE / 2.0
-
-                # text_patch = PathPatch(tp, transform=plt.matplotlib.transforms.Affine2D().translate(-bbox.width / 2.0, -bbox.height / 2.0).scale(scale).translate(x_text, y_text) + ax.transData, color='black', lw=0, zorder=3)
-
-                # ax.add_patch(text_patch)
-
             else:
                 top = max(self.gates[gate_i].targets)
                 bot = min(self.gates[gate_i].targets)
@@ -386,6 +407,13 @@ class QC:
 
                     ax.plot([x + GATE_SIZE / 2.0, x + GATE_SIZE / 2.0], [self.gates[gate_i].targets[0] - .9*CIRCLE_RADIUS_2, self.gates[gate_i].targets[0] + .9*CIRCLE_RADIUS_2], linewidth=LINE_WIDTH, color="black", zorder=3)
 
+                elif (self.gates[gate_i].label == "SWAP") and (len(self.gates[gate_i].targets) == 2) and (self.gates[gate_i].is_measurement == False):
+                    ax.plot([x + GATE_SIZE / 2.0, x + GATE_SIZE / 2.0], [self.gates[gate_i].targets[0], self.gates[gate_i].targets[1]], linewidth=LINE_WIDTH, color="black", zorder=3)
+                    ax.plot([x + GATE_SIZE / 2.0 - CIRCLE_RADIUS_2 / np.sqrt(2.), x + GATE_SIZE / 2.0 + CIRCLE_RADIUS_2 / np.sqrt(2.)], [self.gates[gate_i].targets[0] - CIRCLE_RADIUS_2 / np.sqrt(2.), self.gates[gate_i].targets[0] + CIRCLE_RADIUS_2 / np.sqrt(2.)], linewidth=LINE_WIDTH, color="black", zorder=3)
+                    ax.plot([x + GATE_SIZE / 2.0 - CIRCLE_RADIUS_2 / np.sqrt(2.), x + GATE_SIZE / 2.0 + CIRCLE_RADIUS_2 / np.sqrt(2.)], [self.gates[gate_i].targets[0] + CIRCLE_RADIUS_2 / np.sqrt(2.), self.gates[gate_i].targets[0] - CIRCLE_RADIUS_2 / np.sqrt(2.)], linewidth=LINE_WIDTH, color="black", zorder=3)
+                    ax.plot([x + GATE_SIZE / 2.0 - CIRCLE_RADIUS_2 / np.sqrt(2.), x + GATE_SIZE / 2.0 + CIRCLE_RADIUS_2 / np.sqrt(2.)], [self.gates[gate_i].targets[1] - CIRCLE_RADIUS_2 / np.sqrt(2.), self.gates[gate_i].targets[1] + CIRCLE_RADIUS_2 / np.sqrt(2.)], linewidth=LINE_WIDTH, color="black", zorder=3)
+                    ax.plot([x + GATE_SIZE / 2.0 - CIRCLE_RADIUS_2 / np.sqrt(2.), x + GATE_SIZE / 2.0 + CIRCLE_RADIUS_2 / np.sqrt(2.)], [self.gates[gate_i].targets[1] + CIRCLE_RADIUS_2 / np.sqrt(2.), self.gates[gate_i].targets[1] - CIRCLE_RADIUS_2 / np.sqrt(2.)], linewidth=LINE_WIDTH, color="black", zorder=3)
+
                 else:
                     rect = Rectangle((x, y), GATE_SIZE, h, linewidth=1, edgecolor='black', facecolor='lightgray', zorder=2)
                     ax.add_patch(rect)
@@ -397,27 +425,11 @@ class QC:
                     scale = (TEXT_SIZE * GATE_SIZE) / max(bbox.width, bbox.height)
 
                     x_text = x + GATE_SIZE / 2.0
-                    y_text = y + GATE_SIZE / 2.0
+                    y_text = y + h / 2.0
 
                     text_patch = PathPatch(tp, transform=plt.matplotlib.transforms.Affine2D().translate(-bbox.width / 2.0, -bbox.height / 2.0).scale(scale).translate(x_text, y_text) + ax.transData, color='black', lw=0, zorder=3)
 
                     ax.add_patch(text_patch)
-
-def simplify_ensemble(ensemble: list[list]) -> list[list]:
-    simplified_ensemble = []
-    orig = deepcopy(ensemble)
-
-    while len(orig) > 0:
-        pure_state = deepcopy(orig[0])
-
-        for i in range(1, len(orig)):
-            if np.array_equal(pure_state[1], orig[i][1]): 
-                pure_state[0] += orig[i][0]
-
-        simplified_ensemble.append(pure_state)
-        orig = [left_over for left_over in orig if not np.array_equal(pure_state[1], left_over[1])]
-
-    return simplified_ensemble
 
 def remove_classical(ensemble: list[list]) -> list[list]:
     output_ensemble = []
@@ -428,24 +440,85 @@ def remove_classical(ensemble: list[list]) -> list[list]:
 
     return simplify_ensemble(output_ensemble)
 
-def qubit_state(state: np.array, qubit: int) -> np.array:
-    output_state = np.zeros((2, 1), dtype=np.complex128)
+def qb_proj(state: np.array, qubits: list[int]) -> np.array:
+    output_state = np.zeros((2**len(qubits), 1), dtype=np.complex128)
     for i in range(len(state)):
-        if ((i >> qubit) & 1 == 0):
-            output_state[0] += state[i]
-        else:
-            output_state[1] += state[i]
+
+        proj_state = ""
+        for qb in qubits:
+            proj_state = str((i >> qb) & 1) + proj_state
+        proj_state = int(proj_state, 2)
+
+        output_state[proj_state] += state[i]
 
     return output_state
 
-def qubit_ensemble(ensemble: list[list], qubit: int) -> list[list]:
+def qb_proj_ensemble(ensemble: list[list], qubits: list[int]) -> list[list]:
     output_ensemble = []
     orig = deepcopy(ensemble)
     for pure_state in orig:
-        pure_state[1] = qubit_state(pure_state[1], qubit)
+        pure_state[1] = qb_proj(pure_state[1], qubits)
         output_ensemble.append(pure_state)
 
     return simplify_ensemble(output_ensemble)
+
+def round_ensemble(ensemble: list[list], n: int = 5) -> list[list]:
+    output_ensemble = []
+    orig = deepcopy(ensemble)
+    for pure_state in orig:
+        pure_state[0] = round(pure_state[0], n)
+        if pure_state[0] != 0.0:
+            output_ensemble.append(pure_state)
+
+    return simplify_ensemble(output_ensemble)
+
+def otimes(U: np.array, n: int):
+    if n <= 1:
+        return U
+
+    U_n = U.copy()
+
+    for _ in range(n - 1):
+        U_n = np.kron(U, U_n)
+
+    return U_n
+
+
+
+
+
+def FT_qc(n: int) -> QC:
+    # Can make much faster
+    qc = QC(n)
+
+    for q in range(n):
+        qc.add_gate(H, [(n - 1) - q])
+
+        for k in range(1, n - q):
+            R_k = np.array([
+                [1.0, 0.0],
+                [0.0, np.exp(complex(0, pi / (2**k)))]
+            ], dtype=np.complex128)
+
+            qc.add_gate(R_k, [(n - 1) - q], [(n - 1) - q - k], label=f"R_{k}")
+
+    for q in range(n // 2):
+        qc.add_gate(SWAP, [q, (n - 1) - q])
+
+    return qc
+
+def FT_mat(n: int) -> csr_matrix:
+    return FT_qc(n).get_matrix()
+
+def IFT_mat(n: int) -> csr_matrix:
+    return np.linalg.inv(FT_mat(n).toarray())
+
+
+
+
+def print_ensemble(ensemble: list[list]) -> None:
+    for pure_state in ensemble:
+        print(f"{round(100 * pure_state[0], 2)}%: {dirac(pure_state[1])}")
 
 def draw() -> None:
     plt.show()
